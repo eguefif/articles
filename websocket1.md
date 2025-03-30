@@ -310,4 +310,245 @@ Sec-WebSocket-Accept: {}\r\n\r\n
 }
 ```
 
-If we try it with Postman, we see that it managed to connect and was disconnected right awayt. 
+If we try it with Postman, we see that it managed to connect and was disconnected right away because our handle client thread stops. 
+
+## The client handshake
+The code for the client is to written in another project.
+
+### Lay down the basic of a TCP connection
+Let's write how we would like to use the websocket client in our main.
+```rust
+use crate::websocketclient::WebSocketClient;
+mod websocketclient;
+
+fn main() {
+    let mut websocket = WebSocketClient::new("127.0.0.1", 8000);
+    websocket.send_frame("Hello, World");
+    let response = websocket.read_frame();
+    println!("Response");
+}
+```
+First we want to create a websocket and initialized it in the `new` function. Then we would like to send and read something. Let's write our basic WebSocketClient.
+
+```rust
+use std::net::TcpStream;
+
+pub struct WebSocketClient {
+    socket: TcpStream,
+}
+
+impl WebSocketClient {
+    pub fn new(ip: &str, port: i32) -> Self {
+        let socket = TcpStream::connect(format!("{}:{}", ip, port))
+            .expect("Error: impossible to connect to remote");
+        Self { socket }
+    }
+
+    pub fn send_frame(&mut self, payload: &str) {
+        println!("Sending: {payload}");
+    }
+
+    pub fn read_frame(&mut self) -> String {
+        "Hello World".to_string()
+    }
+}
+```
+
+The `send_frame` and `read_frame` will be covered in the frame section. Let's focus on how make the handshake on the client side.
+
+### Writing the flow first
+We want to send an Http request to the server with the client's key. We can study what postman sent as a working base.
+```bash
+GET / HTTP/1.1
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Key: 7hKoimIDBLiE9aYdyn8amA==
+Connection: Upgrade
+Upgrade: websocket
+Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+Host: 127.0.0.1:8000
+```
+We want to generate a key, a request and then send it. Let's write the code of our flow with some basic function definitions.
+```rust
+use std::io::Write;
+
+impl WebSocket{
+    pub fn new(ip: &str, port: i32) -> Self {
+        let socket = TcpStream::connect(format!("{}:{}", ip, port))
+            .expect("Error: impossible to connect to remote");
+        let key = generate_key();
+        let request = build_request(key);
+        socket.write_all(request.as_bytes()).unwrap();
+        check_server_response(&mut socket);
+        Self { socket }
+    }
+    //...
+}
+
+fn generate_key() -> String {
+    "dummy_key".to_string()
+}
+
+fn build_request(key: &str) -> String {
+    format!("dummy header {key}")
+}
+
+fn check_server_response(socket: &mut TcpStream) {}
+```
+
+We know what to do next. Let's study the key generation
+
+### How to generate the key
+Let's quote the RFC first:
+> The request MUST include a header field with the name |Sec-WebSocket-Key|.  The value of this header field MUST be a nonce consisting of a randomly selected 16-byte value that has been base64-encoded (see Section 4 of [RFC4648]). The nonce MUST be selected randomly for each connection.
+
+In pseudo code, the generation looks like.
+```rust
+let nonce = generate_16_byte_long_string();
+base64.encode(nonce)
+```
+First we will need the base64 library we use for the server and the rand library. Let's add that in our `cargo.toml`
+```toml
+rand = "0.9.0"
+base64 = "0.22.1"
+```
+
+Then here is the code to generate the key:
+```rust
+fn generate_key() -> String {
+    let mut rng = rand::rng();
+    let mut key = String::new();
+
+    for _ in 0..16 {
+        key.push(rng.random::<char>());
+    }
+    BASE64_STANDARD.encode(key)
+}
+
+```
+
+ ### Sending the handshake init request
+We just need to take the Http header we see earlier, remove the optional header and put our fresly generated key. It looks like this:
+```rust
+fn build_request(key: &str) -> String {
+    let request = format!(
+        "GET / HTTP/1.1\r\n\
+Sec-WebSocket-Version: 13\r\n\
+Sec-WebSocket-Key: {key}\r\n\
+Connection: Upgrade\r\n\
+Upgrade: websocket\r\n\
+Host: 127.0.0.1:8000\r\n\r\n"
+    )
+}
+```
+We will use our own server to interact. Because we don't really check the header, we know it will work. Let's display the server response.
+
+```rust
+fn check_server_response(socket: &mut TcpStream) {
+    let response = read_server_http_response(socket).unwrap();
+    println!("{response}")
+}
+
+fn read_server_http_response(socket: &mut TcpStream) -> Option<String> {
+    let mut buffer = vec![0; 1024];
+    let mut response = String::new();
+    loop {
+        if let Ok(_) = socket.read(&mut buffer) {
+            let chunk = String::from_utf8_lossy(&buffer);
+            if chunk.contains("\r\n\r\n") {
+                let chunk = chunk.split("\r\n\r\n").next().unwrap();
+                response.push_str(&chunk);
+                return Some(response);
+            }
+            response.push_str(&chunk);
+        } else {
+            break;
+        }
+    }
+    None
+}
+```
+The logic is from the server. We read the stream until we find \r\n\r\n and we return the response.
+
+```bash
+$ cargo run
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: LfBTW9X7bjL2jHlPdymxQ8kJ7tk=
+```
+We recognize the header we wrote earlier. We're right on track. Let's now check if the server returns a valid key.
+Let's first write how we want the logic to work according to what we know. We want first to extract the key. We want to use the key we send to compare with what the server return. Thus we need to transform the key we sent the same way and compare with the server result. Let's replace the println with this code:
+
+```rust
+fn check_server_response(socket: &mut TcpStream, key: String) {
+    let response = read_server_http_response(socket).unwrap();
+    let client_key = extract_client_key(&response);
+    let control_key = get_control_key(&key);
+    if client_key != control_key {
+        panic!("Error: wrong Sec-WebSocket-Accept key");
+    }
+}
+
+fn extract_client_key(response: &str) -> String {
+    response.to_string()
+}
+
+fn get_control_key(key: &str) -> String {
+    key.to_string()
+}
+```
+First we want to extract the server key. We already know how to do that.
+```rust
+fn extract_server_key(response: &str) -> String {
+    for line in response.lines() {
+        if line.contains("Sec-WebSocket-Accept") {
+            let mut splits = line.split(":");
+            splits.next().expect("Error: header wrong format");
+            return splits
+                .next()
+                .expect("Error: no value for websocket key")
+                .trim()
+                .to_string();
+        }
+    }
+    panic!("Error: not a valid websocket upgrade response")
+}
+```
+Be carefull, we are looking for `Sec-WebSocket-Accept`.
+The control key follows the same logic as the server. We need to add the `sha` library in our cargo.toml.
+```toml
+[dependencies]
+rand = "0.9.0"
+base64 = "0.22.1"
+sha1 = "0.10.6"
+```
+Here is the code.
+```rust
+use sha1::{Digest, Sha1};
+
+fn get_control_key(key: &str) -> String {
+    let guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    let concatenated_key = format!("{}{}", key, guid);
+    let mut hasher = Sha1::new();
+    hasher.update(concatenated_key);
+    let digest = hasher.finalize();
+    BASE64_STANDARD.encode(digest)
+}
+```
+Let's add a print in our main to see if it works. If it doesn't, the program will crash because the control key is not like the server key.
+```rust
+fn main() {
+    let mut websocket = WebSocketClient::new("127.0.0.1", 8000);
+    println!("Handshake done");
+    ...
+}
+```
+
+let's try it.
+```bash
+$ cargo run
+Handshake done
+```
+It worked. Nice job. We just made a working websocket handshake. From now on, our server and client will only communicate using frame. We'll see how it looks like in another article.
+
+The huge benefit with websocket is that, once the handshake is done, the TCP/TLS connection stay opened. This two protocols carry some overhead. They have handshake on their own and the TLS add some encryption. When we use Websocket, we dont' have to remake the TCP and TLS handshake which saves some time. It's faster.
