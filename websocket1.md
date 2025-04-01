@@ -1,4 +1,4 @@
-# Writing a WebSocket echo server in Rust
+# Writing a WebSocket echo server in Rust: the handshake
 
 Websocket are a convenient way to maintain a connexion between a server and client using all the existing http infrastructure. In this article, we'll cover the basic of a working websocket echo server. We will cover the handshake and frame concept.
 Here is a link to the [rfc 6455](https://datatracker.ietf.org/doc/html/rfc6455)
@@ -482,14 +482,14 @@ Let's first write how we want the logic to work according to what we know. We wa
 ```rust
 fn check_server_response(socket: &mut TcpStream, key: String) {
     let response = read_server_http_response(socket).unwrap();
-    let client_key = extract_client_key(&response);
+    let client_key = extract_server_key(&response);
     let control_key = get_control_key(&key);
     if client_key != control_key {
         panic!("Error: wrong Sec-WebSocket-Accept key");
     }
 }
 
-fn extract_client_key(response: &str) -> String {
+fn extract_server_key(response: &str) -> String {
     response.to_string()
 }
 
@@ -552,3 +552,5 @@ Handshake done
 It worked. Nice job. We just made a working websocket handshake. From now on, our server and client will only communicate using frame. We'll see how it looks like in another article.
 
 The huge benefit with websocket is that, once the handshake is done, the TCP/TLS connection stay opened. This two protocols carry some overhead. They have handshake on their own and the TLS add some encryption. When we use Websocket, we dont' have to remake the TCP and TLS handshake which saves some time. It's faster.
+
+
