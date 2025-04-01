@@ -132,7 +132,7 @@ fn handle_client(socket: TcpStream) {
     let mut websocket = WebSocketServer::new(socket).unwrap();
     loop {
         let payload = websocket.try_read_frame().unwrap();
-        websocket.send_frame(payload);
+        websocket.send_frame(payload).unwrap();
         break;
     }
 }
@@ -391,9 +391,80 @@ fn unmask_payload(payload: &[u8], mask: &[u8]) -> String {
     String::from_utf8_lossy(&unmasked_payload).to_string()
 }
 ```
-Let's run cargo test and... it passes. We successfully read a frame!
+Let's run cargo test and... it passes. We successfully read a frame! You can go ahead and try will Postman. The write_frame will print the payload.
 
-## The write frame!
+## Write frame
+
+The first thing is to edit our `websocket_server struct.write_frame()` function. Let's call a function from our websocket struct
+```rust
+    pub fn send_frame(&mut self, payload: String) -> Result<(), Box<dyn error::Error>> {
+        self.websocket.write_frame(payload)?;
+        Ok(())
+    }
+```
+The sending will be easier. Because we are working on a server first, we don't need to mask the payload. If we were to mask the payload, we could use the same function than unmask (we'd renamed it apply_mask()). The same operation work for masking and unmasking. We would just have to tell the function what we want to do. For now, let's skip that.
+Let's see how the code looks like.
+
+```rust
+    //...
+    pub fn write_frame(&mut self, payload: String) -> Result<(), Box<dyn Error>> {
+        let payload_bytes = payload.as_bytes();
+        let mut frame: Vec<u8> = Vec::new();
+
+        encode_fin(&mut frame);
+        encode_opcode(&mut frame);
+        encode_length(&payload_bytes, &mut frame);
+        add_payload(&mut frame, &payload_bytes);
+
+        self.socket.write_all(&frame)?;
+        Ok(())
+    }
+}
+
+fn encode_fin(frame: &mut Vec<u8>) {
+    // A frame can be sent in multiple fragment.
+    // The first bit tells the client if this is the last fragment of a frame.
+    // Because we have a one fragment long frame, this is also the first.
+    frame.push(0b1000_0000);
+}
+
+fn encode_opcode(frame: &mut Vec<u8>) {
+    let first_byte = frame.pop().unwrap();
+    // This tells the client the payload is text.
+    frame.push(0b1000_0001 | first_byte);
+}
+
+fn encode_length(payload_bytes: &[u8], frame: &mut Vec<u8>) {
+    let payload_len = payload_bytes.len();
+
+    if payload_len < 126 {
+        frame.push(payload_len as u8);
+    } else if payload_len <= 65_535 {
+        frame.push(126);
+        frame.extend_from_slice(&(payload_len as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.push(0);
+        frame.push(0);
+        frame.extend_from_slice(&(payload_len as u64).to_be_bytes());
+    }
+}
+
+fn add_payload(frame: &mut Vec<u8>, payload_bytes: &[u8]) {
+    frame.extend_from_slice(payload_bytes);
+}
+```
+
+### Fix the bug
+If you follow along here. It does not work. We have a bug. It took 2 hours to found out why. Maybe you alrady know. I'm just gonna show you my debugging process.
+If you tried to use Postman, you mostlikely encounter the following error(maybe you didn't because you implemented correctly).
+Here is the error: `Error: Invalid WebSocket frame: FIN must be set`
+
+To debug, I used tshark, which is the cli for wireshark. It allows you to look at the TCP traffic. I don't really know how to use but, if you want to check what's happening on your local interface and intercept only websocket frame, you can run it using:
+```bash
+tshark -i lo -Y "websocket.opcode == 10" -x
+```
+Here is what I had when I ran it while using postman.
 
 ```bash
 Frame (77 bytes):
@@ -416,3 +487,40 @@ Reassembled TCP (8 bytes):
 Unmasked data (1 byte):
 0000  69                                                i
 ```
+The first packed is sent by Postman. The second packet is our server. You need to look at the `Reassembled TCP (8bytes):`.
+` 0000  0a 81 05 48 65 6c 6c 6f                           ...Hello`
+The 81 is the hexadecimal for 0b1000_0001. This is supposed to be the beginning of our frame. Instead, we have a 0a. At some point I realised that 0a is ASCII for return to line. I actually forget to escape the last return to line of our handshake string in `websococket_server`. 
+
+```rust
+    format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Accept: {}\r\n\r\n// This is where we have a problem. There is a hidden return to line.
+            ", 
+        server_key
+    )
+```
+
+Here is the corrected code:
+```rust
+    format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+Upgrade: websocket\r\n\
+Connection: Upgrade\r\n\
+Sec-WebSocket-Accept: {}\r\n\r\n\ // We fix it by escaping using \
+            ",
+        server_key
+    )
+```
+
+If you use Postman again, it works!
+
+# Conclusion
+ It was pretty nice. We still have a lot todo. We need to be sure we read correctly the socket. At the moment, if something arrive in multiple packet, we won't be able to read it properly. We then have to handle the following:
+* ping pong opcode
+* binary payload
+* multiple fragment frame
+* client writing frame masking
+* extensions
+* and so on
