@@ -56,11 +56,11 @@ The data part contains the IP header and our ICMP data. We can recongnized the I
 Here is the ICMP data:
 For the egress packet
 ```bash
-8e 4a 00 01 64 21 0d 68 
+08 00 db 5e 8e 4a 00 01 
 ```
 For the ingress packet:
 ```bash
-00 00 00 00 5d f9
+00 00 e3 5e 8e 4a 00 01 
 ```
 If we look at the ICMP rfc, we can confirm that an echo packet starts with 8 and an echo reply starts with 0.
 ```bash
@@ -245,5 +245,71 @@ int init_socket(struct sockaddr_in addr) {
         exit(1);
     }
     return sockfd;
+}
+```
+
+### Building and sending our packet
+In order to build an ICMP packet, we need to use the `icmphdr` struct. I found the definition on this [website](https://sites.uclouvain.be/SystInfo/usr/include/netinet/ip_icmp.h.html).
+We add to that a message randomly genereated. Here is the code for our packet initializer.
+
+```c
+typedef struct {
+    struct icmphdr header;
+    char message[64 - sizeof(struct icmphdr)];
+} Packet;
+
+Packet init_packet() {
+    Packet packet;
+
+    bzero(&packet, sizeof(Packet));
+    packet.header.type = ICMP_ECHO;
+    packet.header.un.echo.sequence = getpid();
+    packet.header.un.echo.sequence = 0;
+    packet.header.checksum = calculate_checksum(&packet);
+
+    for (int i = 0; i < 10; i++) {
+        packet.message[i] = (char)i + ' ';
+    }
+
+    return packet;
+}
+```
+
+It's pretty straightforwar. The `un` in `packet.header.un` is the union that you can see in the struct source code. The same memory space is used either for ICMP echo or for MTU. It's not possible to do both.
+
+We don't have a `calculate_checksum` function yet. This one was tricky. The best explanation I found was on the actual [ping source code](https://github.com/dgibson/iputils/blob/8f6403b0f7589d664f5764e9de3af15dd6e45aa8/ping.c#L903). There is [a video](https://www.youtube.com/watch?v=EmUuFRMJbss) I found that explain the maths behind the checksum. I won't explain the algorithm.
+
+```c
+uint16_t calculate_checksum(void *packet) {
+    uint16_t *buffer = packet;
+    uint16_t sum = 0;
+    int max = sizeof(Packet);
+
+    for (int i = 0; i < max; i += 2)
+        sum += *buffer++;
+    if (max % 2 != 0) {
+        sum += *(unsigned char *)buffer;
+    }
+
+    sum = (sum >> 16) + (sum & 0xFFFF);
+    sum += (sum >> 16);
+
+    return ~sum;
+}
+```
+After building our packet, we need to send it. We did not use the `connect` function. We need to tell the system the destination. We will use `sendto`. Here is the code.
+
+```c
+uint16_t calculate_checksum(void *packet);
+Packet init_packet();
+
+void send_ping(int sockfd, struct sockaddr_in addr) {
+    Packet packet = init_packet();
+
+    if (sendto(sockfd, &packet, sizeof(Packet), 0, (struct sockaddr *)&addr,
+               sizeof(addr)) == -1) {
+        fprintf(stderr, "Error: failed to send packet\n");
+        exit(EXIT_FAILURE);
+    }
 }
 ```
