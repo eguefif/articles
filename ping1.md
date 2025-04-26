@@ -313,3 +313,34 @@ void send_ping(int sockfd, struct sockaddr_in addr) {
     }
 }
 ```
+
+### Handling the echo response
+For now, we won't check if we have ther right packet from the right source. We just gonna check the type and code. There are supposed to be zero.
+The only trick with the following is related to the Internet Protocol header. We cast the buffer into the `iphdr` struct. It will gives us the IP header size.
+We need to multiply by four. It is because the size is expressed in 32 bits. I explained that already in the first part of the article.
+We then cast the buffer from the end of the IP header into an `icmphdr` struct and here we are, we got our icmp packet back.
+
+```c
+void handle_echo(int sockfd) {
+    char buffer[100];
+
+    int n = recv(sockfd, buffer, 100, 0);
+    if (n > 1) {
+        struct iphdr *ip = (struct iphdr *)buffer;
+        struct icmphdr *hdr = (struct icmphdr *)(buffer + ip->ihl * 4);
+        printf("Packet received with ICMP type %d, code %d\n", hdr->type,
+               hdr->code);
+    } else {
+        fprintf(stderr, "Error: receiving failed\n");
+    }
+}
+```
+
+If we run our program:
+```bash
+$ gcc main.c -o ping
+$ sudo ./ping 1.1.1.1
+
+Packet received with ICMP type 0, code 0
+```
+It works! Next time we'll add a DNS lookup, check the return value and add a time measuring feature.
